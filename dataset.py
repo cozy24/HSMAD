@@ -6,8 +6,7 @@ from sklearn.model_selection import train_test_split
 class Dataset:
     def __init__(self, 
                  name='tfinance', 
-                 prefix='datasets/', 
-                 mode='supervised', 
+                 prefix='datasets/',
                  seed=42):
         graphs, _ = load_graphs(prefix + name)
         graph = graphs[0]
@@ -16,8 +15,8 @@ class Dataset:
         if prefix == 'datasets/':
             graph = dgl.to_bidirected(graph)
             graph = dgl.remove_self_loop(graph)
-            graph = dgl.add_self_loop(graph)
-            
+            graph = dgl.add_self_loop(graph)   
+        
         self.name = name
         self.graph = graph
 
@@ -53,46 +52,19 @@ class Dataset:
             n_val,   a_val,   r_val   = ratio_info(val_mask)
             n_test,  a_test,  r_test  = ratio_info(test_mask)
 
-            print(f"✅ Dataset '{name}' loaded in {mode} mode!")
             print(f"Train: {train_mask.sum().item()} nodes (normal={n_train}, anomaly={a_train}, ratio={r_train:.3f})")
             print(f"Val:   {val_mask.sum().item()} nodes (normal={n_val}, anomaly={a_val}, ratio={r_val:.3f})")
             print(f"Test:  {test_mask.sum().item()} nodes (normal={n_test}, anomaly={a_test}, ratio={r_test:.3f})")
 
-        # ====== 模式 1：监督 ======
-        if mode == 'supervised':
-            idx_train, idx_rest, y_train, y_rest = train_test_split(index, labels[index],  
-                                                                    stratify=labels[index],  
-                                                                    train_size=0.4,
-                                                                    random_state=2, shuffle=True)
-            idx_valid, idx_test, y_valid, y_test = train_test_split(idx_rest, y_rest,
-                                                                    stratify=y_rest,
-                                                                    test_size=0.67,
-                                                                    random_state=2, shuffle=True)
-            assign_masks(idx_train, idx_valid, idx_test)
-
-        # ====== 模式 2：半监督 ======
-        elif mode == 'semi_supervised':
-            idx_train, idx_rest, y_train, y_rest = train_test_split(
-                index, labels[index],
-                stratify=labels[index],
-                train_size=100,
-                random_state=2, shuffle=True
-            )
-            idx_valid, idx_test, y_valid, y_test = train_test_split(
-                idx_rest, y_rest,
-                stratify=y_rest,
-                train_size=100,
-                random_state=2, shuffle=True
-            )
-            assign_masks(idx_train, idx_valid, idx_test)
-
-        else:
-            raise ValueError("mode must be 'supervised' or 'semi_supervised'")
+        idx_train, idx_rest, y_train, y_rest = train_test_split(index, labels[index],  
+                                                                stratify=labels[index],  
+                                                                train_size=0.4,
+                                                                random_state=2, shuffle=True)
+        idx_valid, idx_test, y_valid, y_test = train_test_split(idx_rest, y_rest,
+                                                                stratify=y_rest,
+                                                                test_size=0.67,
+                                                                random_state=2, shuffle=True)
+        assign_masks(idx_train, idx_valid, idx_test)
 
         graph.ndata['label'] = torch.tensor(labels, dtype=torch.long)
         graph.ndata['feature'] = features.float()
-
-def preprocess_features(features):
-    rowsum = features.sum(dim=1, keepdim=True)
-    rowsum = rowsum + 1e-6  
-    return features / rowsum
