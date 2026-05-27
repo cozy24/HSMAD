@@ -12,7 +12,6 @@ import numpy as np
 from torch.nn import init
 from dgl.nn.pytorch import GraphConv
 from sklearn.metrics import roc_auc_score
-from heterophily_analysis import *
 from manifold_update import WeightedMessagePassing
 def calculate_theta2(d):
     thetas = []
@@ -37,7 +36,6 @@ class PolyConv(nn.Module):
     def forward(self, graph, feat, edge_weight=None, edge_mask=None):
         with graph.local_scope():
 
-            # -------- 1. 构造统一的边权 w --------
             if edge_weight is None and edge_mask is None:
                 w = None
             else:
@@ -57,7 +55,6 @@ class PolyConv(nn.Module):
                 deg = deg.clamp(min=1)
                 D_invsqrt = deg.pow(-0.5).unsqueeze(-1)
 
-            # -------- 2. 无权全图特例 --------
             if w is None:
                 deg = graph.in_degrees().float().clamp(min=1)
                 D_invsqrt = deg.pow(-0.5).unsqueeze(-1)
@@ -65,7 +62,6 @@ class PolyConv(nn.Module):
             else:
                 weighted_edges = 'w'
 
-            # -------- 3. 多项式 Laplacian 递推 --------
             h = self.theta[0] * feat
             Xk = feat
 
@@ -111,54 +107,45 @@ class WeightedLapModule(nn.Module):
         self.act = nn.ReLU()
         self.dropout = nn.Dropout(0.5)
 
-        self.linear1 = nn.ModuleDict()
-        self.linear2 = nn.ModuleDict()
-        self.norm1 = nn.ModuleDict()
-        self.norm2 = nn.ModuleDict()
-
-        self.linear3 = nn.ModuleDict()
-        self.norm3 = nn.ModuleDict()
-
-        for etype in graph.etypes:
-
-            self.linear1[etype] = nn.Linear(in_feats, h_feats)
-            self.linear2[etype] = nn.Linear(h_feats, h_feats)
-            self.norm1[etype] = nn.LayerNorm(h_feats)
-            self.norm2[etype] = nn.LayerNorm(h_feats)
-            self.linear3[etype] = nn.Linear(h_feats * len(self.convs), h_feats)
-            self.norm3[etype] = nn.LayerNorm(h_feats)
+        self.linear1 = nn.Linear(in_feats, h_feats)
+        self.linear2 = nn.Linear(h_feats, h_feats)
+        self.norm1 = nn.LayerNorm(h_feats)
+        self.norm2 = nn.LayerNorm(h_feats)
+        self.linear3 = nn.Linear(h_feats * len(self.convs), h_feats)
+        self.norm3 = nn.LayerNorm(h_feats)
 
         self.norm_out = nn.LayerNorm(h_feats)
         self.log_alpha_dict = nn.ParameterDict({
             etype: nn.Parameter(torch.tensor(0.0)) for etype in graph.etypes
         })
-        self.beta_dict = nn.ParameterDict({
-            etype: nn.Parameter(torch.tensor(0.5)) for etype in graph.etypes
-        })
+        self.log_alpha = nn.Parameter(torch.tensor(0.0))
+        self.rho = nn.Parameter(torch.tensor(0.5))
 
-    def apply_branch(self, feat, etype):
-        h = self.linear1[etype](feat)
-        h = self.norm1[etype](h)
+    def apply_branch(self, feat):
+        h = self.linear1(feat)
+        h = self.norm1(h)
         h = self.act(h)
         h = self.dropout(h)
 
-        h = self.linear2[etype](h)
-        h = self.norm2[etype](h)
+        h = self.linear2(h)
+        h = self.norm2(h)
         h = self.act(h)
         h = self.dropout(h)
         return h
 
-
     def apply_convs(self, graph, h, convs, edge_weight=None, edge_mask=None):
+
         outputs = []
-        for conv in convs:
-            outputs.append(conv(graph, h, edge_weight, edge_mask))
+
+        for i, conv in enumerate(convs):
+            h = conv(graph, h, edge_weight, edge_mask)
+            outputs.append(h)
+
         return torch.cat(outputs, dim=-1)
 
-
     def forward(self, g, feat, edge_preds):
-        final_out = 0
-        num_types = len(edge_preds)
+        alpha = torch.exp(self.log_alpha)
+        h = self.apply_branch(feat)
         for etype, edge_pred in edge_preds.items():
             graph = g[etype]
             edge_hetero = torch.sigmoid(edge_pred)
@@ -172,34 +159,20 @@ class WeightedLapModule(nn.Module):
 
             low_mask = edge_hetero < threshold
             high_mask = edge_hetero >= threshold
-            alpha = torch.exp(self.log_alpha_dict[etype])
-            edge_weight = torch.exp(-alpha * edge_hetero)
-            low_mask = edge_hetero < threshold
-            high_mask = edge_hetero >= threshold
-            alpha = torch.exp(self.log_alpha_dict[etype])
-            edge_weight = torch.exp(-alpha * edge_hetero)
+            w  = torch.exp(-alpha * edge_hetero)
 
-            h = self.apply_branch(feat, etype)
+            h_low = self.apply_convs(graph, h, self.convs, edge_weight=w, edge_mask=low_mask)
+            h_high = self.apply_convs(graph, h, self.convs, edge_weight=w, edge_mask=high_mask)
 
-            h_low = self.apply_convs(graph, h, self.convs, edge_weight=edge_weight, edge_mask=low_mask)
-            h_high = self.apply_convs(graph, h, self.convs, edge_weight=edge_weight, edge_mask=high_mask)
-            
-            beta = torch.sigmoid(self.beta_dict[etype])
-            h_final = beta * h_low + (1 - beta) * h_high
+        rho = torch.sigmoid(self.rho)
+        h_final = rho * h_low + (1 - rho) * h_high
 
-            combined_feat = self.linear3[etype](h_final)
-            combined_feat = self.norm3[etype](combined_feat)
-            combined_feat = self.act(combined_feat)
-            combined_feat = self.dropout(combined_feat)
+        combined_feat = self.linear3(h_final)
+        combined_feat = self.norm3(combined_feat)
+        combined_feat = self.act(combined_feat)
+        combined_feat = self.dropout(combined_feat)
 
-            final_out += combined_feat
-
-        final_out /= num_types
-
-        if num_types > 1:
-            final_out = self.norm_out(final_out)
-
-        return final_out
+        return combined_feat
     
 class CombinedModel(nn.Module):
     def __init__(self, graph, in_feats, hidden_feats, out_feats, d, quantile=0.3, dropout=0.5):
@@ -217,7 +190,7 @@ class CombinedModel(nn.Module):
         self.unique_u_dict = {}
         self.unique_v_dict = {}
         self.inverse_idx_dict = {}
-
+        self.gate = nn.Parameter(torch.tensor(0.5))
         for etype in graph.etypes:
             src, dst = graph.edges(etype=etype)
             min_idx = torch.min(src, dst)
@@ -230,7 +203,7 @@ class CombinedModel(nn.Module):
             self.unique_u_dict[etype] = u
             self.unique_v_dict[etype] = v
             self.inverse_idx_dict[etype] = inverse_idx
-            self.alpha = nn.Parameter(torch.tensor(0.5))
+            
         
         self.fusion = nn.Sequential(
             nn.LayerNorm(hidden_feats),
@@ -244,7 +217,10 @@ class CombinedModel(nn.Module):
             u = self.unique_u_dict[etype]
             v = self.unique_v_dict[etype]
             inverse_idx = self.inverse_idx_dict[etype]
-            edge_feat_unique = torch.abs(features[u] - features[v])  
+            h_u = features[u]
+            h_v = features[v]
+
+            edge_feat_unique = torch.abs(h_u - h_v)
             edge_pred_unique = self.edge_classifiers[etype](edge_feat_unique)
             edge_pred_full = edge_pred_unique[inverse_idx]
 
@@ -253,8 +229,8 @@ class CombinedModel(nn.Module):
         h_curv = self.curv(self.graph, features, edge_preds)
         h_spec = self.graph_partition_module(self.graph, features, edge_preds)
 
-        alpha = torch.sigmoid(self.alpha)
-        combined = alpha * h_curv + (1 - alpha) * h_spec
+        gate = torch.sigmoid(self.gate)
+        combined = gate * h_curv + (1 - gate) * h_spec
 
         output = self.fusion(combined)
 
@@ -263,11 +239,9 @@ class CombinedModel(nn.Module):
     def compute_loss(self, output, labels, edge_labels, edge_preds, node_mask):
         device = output.device
 
-        # ---- 节点分类损失 ----
         masked_output = output[node_mask]
         masked_labels = labels[node_mask]
 
-        # 只保留标签为 0 或 1 的样本
         binary_mask = (masked_labels == 0) | (masked_labels == 1)
 
         masked_output = masked_output[binary_mask]
@@ -275,22 +249,17 @@ class CombinedModel(nn.Module):
 
         node_loss = F.nll_loss(masked_output, masked_labels)
 
-
-        # ---- 根据 node_mask 生成 edge_mask ----
         edge_masks = {}
         for etype in self.graph.etypes:
             src, dst = self.graph.edges(etype=etype)
             src, dst = src.to(device), dst.to(device)
 
-            # 节点标签为 0 或 1
             label_mask_src = (labels[src] == 0) | (labels[src] == 1)
             label_mask_dst = (labels[dst] == 0) | (labels[dst] == 1)
 
             edge_mask = node_mask[src] & node_mask[dst] & label_mask_src & label_mask_dst
             edge_masks[etype] = edge_mask
 
-
-        # ---- 边损失函数 ----
         def calculate_edge_loss(edge_pred, edge_mask, edge_label):
             masked_edge_labels = edge_label[edge_mask].float()
 
@@ -327,10 +296,8 @@ class CombinedModel(nn.Module):
 
             return loss, stats
 
-
-        # ---- 计算所有边类型的损失 ----
         edge_losses = []
-        edge_stats = {}  # 用于记录统计信息
+        edge_stats = {}  
 
         if isinstance(edge_masks, torch.Tensor):
             for etype, edge_pred in edge_preds.items():
@@ -356,7 +323,6 @@ class CombinedModel(nn.Module):
         w_node = (edge_loss / (node_loss + edge_loss + eps)).detach()
         w_edge = (node_loss / (node_loss + edge_loss + eps)).detach()
 
-        # -------- total loss --------
         total_loss = w_node * node_loss + w_edge * edge_loss
 
         return total_loss
