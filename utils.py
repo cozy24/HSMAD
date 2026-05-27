@@ -269,3 +269,4 @@ def normalize(mx):
 	r_mat_inv = sp.diags(r_inv)
 	mx = r_mat_inv.dot(mx)
 	return mx
+
