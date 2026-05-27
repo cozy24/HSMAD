@@ -1,5 +1,3 @@
-# HSMAD
-
 ## Overview
 
 HSMAD: Heterophily-Driven Spectral and Manifold Learning for Graph Anomaly Detection
