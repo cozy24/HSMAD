@@ -35,4 +35,4 @@ This will train the model using the specified hyperparameters and dataset.
 
 The results of the experiment will include:
 
-- Performance metrics (e.g., Recall, Pecision, F1-Macro, AUC, G-Mean)
+- Performance metrics (e.g., Recall, Pecision, F1-Macro, AUROC, AUPRC, G-Mean)
