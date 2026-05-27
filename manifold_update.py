@@ -89,7 +89,6 @@ class CurvMessagePassing(nn.Module):
             h_src = feat_src @ self.W
             h_self = feat_dst @ self.W_self
 
-            # ===== 3. 度归一化缓存 =====
             if self.norm in ['left', 'both']:
                 if 'norm' in graph.ndata:
                     norm = graph.ndata['norm']
@@ -99,7 +98,6 @@ class CurvMessagePassing(nn.Module):
                     graph.ndata['norm'] = norm
                 h_src = h_src * norm.view(-1, 1)
 
-            # ===== 4. 消息传递 =====
             graph.srcdata['h'] = h_src
             if edge_weight is not None:
                 graph.edata['w'] = edge_weight
@@ -162,7 +160,7 @@ class WeightedMessagePassing(nn.Module):
         self.log_alpha_dict = nn.ParameterDict({
             etype: nn.Parameter(torch.tensor(0.0)) for etype in graph.etypes
         })
-        self.beta = nn.Parameter(torch.tensor(0.5))
+        self.gamma = nn.Parameter(torch.tensor(0.5))
 
     def forward(self, g, features, edge_preds):
         msg_pos_total = 0
@@ -192,8 +190,8 @@ class WeightedMessagePassing(nn.Module):
             msg_pos_total /= num_edge_types
             msg_neg_total /= num_edge_types
 
-        beta = torch.sigmoid(self.beta)
-        z = beta * msg_pos_total + (1 - beta) * msg_neg_total
+        gamma = torch.sigmoid(self.gamma)
+        z = gamma * msg_pos_total + (1 - gamma) * msg_neg_total
 
         z = self.norm_fuse(z)
         z = self.act(z)
